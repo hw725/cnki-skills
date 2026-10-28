@@ -1,201 +1,103 @@
 ---
 name: cnki-export
-description: Export paper from CNKI and push to Zotero, or save as RIS file. Use when user wants to save a paper to Zotero or export citation data.
-argument-hint: "[zotero|ris|gb] [paper URL or blank if on detail page]"
+description: "CNKI 해외판 검색 결과·상세 페이지의 서지를 내보낼 때 쓴다 — ENDNOTE를 받아 vault-pipeline 목록 JSON(CJK RefManager 등록용)·RIS·GB/T 7714로 저장. 성균관대 프록시 경유."
+license: "MIT (upstream README 표기 — LICENSE 파일 없음)"
+argument-hint: "[list|ris|gb] [결과 번호들, 비우면 이 쪽 전부]"
+metadata:
+  author: cookjohn
+  version: 1.0.0
+  category: cjk-research
+  upstream: https://github.com/cookjohn/cnki-skills @ 20d65f660456daf53ad0f7c74494ac3b829b925f
+  local_divergence: |
+    (1) Zotero 연동 스크립트(상류 push_to_zotero.py)를 들이지 않았다 — 이 PC에 Zotero가 없고(2026-10-22 확인),
+        그 스크립트는 세션 쿠키를 받아 PDF를 따로 내려받는다. 서지 정본은 CJK RefManager다.
+    (2) 내보내기 API: 절대 주소 https://kns.cnki.net/dm8/API/GetExport 는 프록시 오리진에서 막힌다(Failed to fetch).
+        상대 경로 /dm8/API/GetExport 와 uniplatform=OVERSEA 로 바꿨다(NZKPT 는 code −1). displaymode 의 elearning 은 소문자여야 한다.
+    (3) 출력을 hwobsidian 적재 흐름에 맞췄다 — vault-pipeline batch 목록 JSON(language=chinese 명시)·RIS·GB/T 7714.
+    (4) 대상·도구·숨은 문자 정리는 cnki-search와 같다. AUD-20261022-123013-5e888b76.
 ---
 
-# CNKI Export & Zotero Integration
+# CNKI 서지 내보내기 (해외판·SKKU 프록시)
 
-Export paper citation data from CNKI and push directly to Zotero, or save as RIS file.
+## 환경
 
-## Arguments
+`cnki-search`의 《환경》과 같다(검색 결과는 `https://oversea-cnki-net-ssl.ca.skku.edu/kns8s/…`, 상세는 `…/kcms2/article/abstract`). API는 그 페이지 안에서 상대 경로로 부른다.
 
-- `zotero` (default) — push to Zotero desktop via local API
-- `ris` — save as .ris file
-- `gb` — output GB/T 7714 citation text
-- Optionally include a paper URL
+## 어디로 가나
 
-## Mode Selection
+이 PC의 논문 적재는 둘로 갈린다(hwobsidian `AGENTS.md` 《RefManager 연동》).
 
-Choose the right mode based on context:
+- **서지** → CJK RefManager. 정본 경로는 cjk-refmanager `vault-pipeline`의 `batch new`·`batch plan`이고, 이 스킬의 **목록 JSON**이 그 입력이다.
+- **원문·구조분석** → hwobsidian. PDF는 `cnki-download`로 받아 `batch match`·`extract`·`write`·`check`·`load`로 넘긴다.
 
-| Context | Mode | Tool calls |
-|---------|------|-----------|
-| On a paper detail page | Single export (Step 1A) | 1 evaluate + 1 bash = **2** |
-| On a search results page, save all/selected | **Batch export (Step 1B)** | 1 evaluate + 1 bash = **2** |
-| Need to search then save | Use cnki-search first, then batch export | **4 total** |
+그래서 기본 출력은 목록 JSON이다. RIS는 다른 서지 도구용, GB/T 7714는 인용문용이다.
 
-**Always prefer batch export (1B) when multiple papers need saving.** It avoids navigating to each detail page (saves ~3 calls per paper).
+## 절차
 
-## Steps
+### 1. ENDNOTE 받기 (한 호출)
 
-### 1A. Single export: from paper detail page
-
-Use `mcp__chrome-devtools__evaluate_script`:
+검색 결과 페이지(`cnki-search`·`cnki-advanced-search` 뒤)에서는 결과 행의 `input.cbItem`을, 상세 페이지에서는 `#export-id`를 쓴다. `pick`에 1부터 센 결과 번호를 넣으면 그것만, 비우면 이 쪽 전부.
 
 ```javascript
-async () => {
-  const url = document.querySelector('#export-url')?.value;
-  const params = document.querySelector('#export-id')?.value;
-  const uniplatform = new URLSearchParams(window.location.search).get('uniplatform') || 'NZKPT';
-  if (!url || !params) return { error: 'Not on a paper detail page' };
-
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ filename: params, displaymode: 'GBTREFER,elearning,EndNote', uniplatform })
-  });
-  const data = await resp.json();
-  if (data.code !== 1) return { error: data.msg };
-
-  const result = {};
-  for (const item of data.data) {
-    result[item.mode] = item.value[0];
-  }
-
-  const body = document.body.innerText;
-  result.pageUrl = window.location.href;
-  result.issn = body.match(/ISSN[：:]\s*(\S+)/)?.[1] || '';
-  result.dbcode = document.querySelector('#paramdbcode')?.value || '';
-  result.dbname = document.querySelector('#paramdbname')?.value || '';
-  result.filename = document.querySelector('#paramfilename')?.value || '';
-
-  return result;
-}
-```
-
-### 1B. Batch export: from search results page (PREFERRED for multiple papers)
-
-On any CNKI search results page, extract checkbox values and call the export API directly — **no need to navigate to detail pages**.
-
-Key discovery: `input.cbItem` checkbox `value` === detail page `#export-id` (same encrypted ID).
-
-Use `mcp__chrome-devtools__evaluate_script`:
-
-```javascript
-async () => {
-  const API_URL = 'https://kns.cnki.net/dm8/API/GetExport';
-
-  // Get all checkbox values (= export encrypted IDs)
-  const checkboxes = document.querySelectorAll('.result-table-list tbody input.cbItem');
-  const rows = document.querySelectorAll('.result-table-list tbody tr');
-
-  if (checkboxes.length === 0) return { error: 'No results on page' };
-
-  const allPapers = [];
-  for (let i = 0; i < checkboxes.length; i++) {
-    const exportId = checkboxes[i].value;
-    const paperUrl = rows[i]?.querySelector('td.name a.fz14')?.href || '';
-
-    const resp = await fetch(API_URL, {
-      method: 'POST',
+await (async () => {
+  const pick = [];   // 예: [1, 3, 5]
+  const S = x => (x || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  const dec = s => S((s || '').replace(/<br>/g, '\n').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&'));
+  const detailId = document.querySelector('#export-id')?.value;
+  const ids = detailId ? [detailId]
+    : [...document.querySelectorAll('.result-table-list tbody input.cbItem')].map(c => c.value)
+        .filter((_, i) => !pick.length || pick.includes(i + 1));
+  if (!ids.length) return { error: 'no-records' };
+  const out = [];
+  for (const id of ids) {
+    const r = await fetch('/dm8/API/GetExport', { method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ filename: exportId, displaymode: 'GBTREFER,elearning,EndNote', uniplatform: 'NZKPT' })
-    });
-    const data = await resp.json();
-    if (data.code === 1) {
-      const result = {};
-      for (const item of data.data) { result[item.mode] = item.value[0]; }
-      result.pageUrl = paperUrl;
-      // Extract ISSN from ENDNOTE %@ field
-      const issnMatch = result.ENDNOTE?.match(/%@\s*([^\s<]+)/);
-      result.issn = issnMatch ? issnMatch[1] : '';
-      result.dbcode = 'CJFQ';
-      result.dbname = '';
-      result.filename = '';
-      allPapers.push(result);
-    }
+      body: new URLSearchParams({ filename: id, displaymode: 'GBTREFER,elearning,EndNote', uniplatform: 'OVERSEA', language: 'CHS' }) });
+    const j = await r.json();
+    if (j.code !== 1) { out.push({ error: j.message || j.code }); continue; }
+    const m = k => dec(j.data.find(d => d.mode === k)?.value?.[0]);
+    out.push({ endnote: m('ENDNOTE'), gbt7714: m('GBTREFER').replace(/^\[\d+\]/, '') });
   }
-
-  return allPapers; // JSON array, directly writable to file for Python script
-}
+  return out;
+})()
 ```
 
-**To export only specific papers** (e.g. #1, #3, #5), filter by index:
+### 2. 변환 (응답을 읽고 직접)
 
-```javascript
-// Replace the for loop condition:
-const indices = [0, 2, 4]; // 0-indexed: papers #1, #3, #5
-for (let i = 0; i < checkboxes.length; i++) {
-  if (!indices.includes(i)) continue;
-  // ... rest same
-}
+ENDNOTE 한 건은 `%태그 값` 줄의 묶음이다. 같은 태그가 여러 번 나오면(저자 `%A`) 배열로 모은다.
+
+**목록 JSON 항목** (vault-pipeline `batch new --list`):
+
+```json
+{ "title": "%T", "authors": ["%A", "…"], "year": "%D(정수)",
+  "type": "journal | thesis",   // %0 이 Thesis 면 thesis, 그 밖은 journal
+  "language": "chinese",        // 반드시 명시 — 빼면 CJK 제목이라 korean 으로 잡힌다
+  "venue": "%J (학위논문은 %I)", "url": "%U", "why": "사용자가 말한 수집 이유", "priority": 1 }
 ```
 
-### 2. Push to Zotero
+`url`은 `%U`(`link.oversea.cnki.net/doi/…` 같은 공개 주소)를 쓴다. 프록시 주소(`*.ca.skku.edu`)는 세션에 묶여 나중에 열리지 않는다.
 
-Save the export data (single object or JSON array) to a temp file, then run the Python script:
+**RIS** 대응: `%0`→`TY`(Journal Article→JOUR, Thesis→THES), `%A`→`AU`, `%T`→`TI`, `%J`→`JO`, `%D`→`PY`, `%N`→`IS`, `%P`→`SP`·`EP`(하이픈으로 나눔), `%@`→`SN`, `%K`→`KW`(세미콜론마다 한 줄), `%X`→`AB`, `%U`→`UR`, `%R`→`DO`, `%I`→`PB`, 끝에 `ER  -`.
 
-```bash
-python "e:/cnki/.claude/skills/cnki-export/scripts/push_to_zotero.py" /tmp/papers.json
+### 3. 저장
+
+Write 도구로 UTF-8(BOM 없음)으로 쓴다. 경로는 사용자에게 묻되, 기본은 이번 배치의 작업 폴더다(예: `…\논문\<주제>\cnki-<날짜>.json`·`.ris`). 같은 이름 파일이 있으면 덮어쓰지 않고 묻는다.
+
+### 4. 넘기기
+
+목록 JSON을 만들었으면 다음 명령을 사용자에게 보인다. 실행은 cjk-refmanager `vault-pipeline` 폴더에서 하고, RefManager 쓰기이므로 사용자의 확인을 받은 뒤 돌린다.
+
+```powershell
+node cli.mjs batch new  --vault <hwobsidian 경로> --id <배치 id> --topic <주제> --list <목록 JSON>
+node cli.mjs batch plan --vault <hwobsidian 경로> --id <배치 id>
 ```
 
-The Python script handles both single paper `{}` and batch `[{}, {}, ...]` JSON input.
+## 확인한 사실 (2026-10-22, 해외판)
 
-- UTF-8 encoding (avoids Windows encoding issues)
-- Parsing ELEARNING format into Zotero item fields
-- Calling `POST http://127.0.0.1:23119/connector/saveItems`
-- Returns: 201 = success, 500 = error, 0 = Zotero not running
-
-### 3. Report result
-
-Single:
-```
-已将论文添加到 Zotero:
-  标题: {title}
-  作者: {authors}
-  期刊: {journal}
-
-GB/T 7714 引用: {gbt_citation}
-```
-
-Batch:
-```
-已批量添加 {count} 篇论文到 Zotero:
-  1. {title1} ({journal1})
-  2. {title2} ({journal2})
-  ...
-```
-
-## Export API Reference
-
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| API URL | `https://kns.cnki.net/dm8/API/GetExport` | Fixed, works from any page |
-| filename | Encrypted ID | Detail page: `#export-id`; Results page: `input.cbItem` value |
-| displaymode | `GBTREFER,elearning,EndNote` | Comma-separated modes |
-| uniplatform | `NZKPT` | Required |
-
-## Verified selectors
-
-| Element | Selector | Page |
-|---------|----------|------|
-| Export URL | `#export-url` | Detail page only |
-| Export ID | `#export-id` | Detail page only |
-| Checkbox (= export ID) | `input.cbItem` | Search results page |
-| Result rows | `.result-table-list tbody tr` | Search results page |
-| Title link | `td.name a.fz14` | Search results page |
-
-## Zotero API Reference
-
-```
-POST http://127.0.0.1:23119/connector/saveItems
-Content-Type: application/json
-X-Zotero-Connector-API-Version: 3
-```
-
-**Response:** 201 = created, 500 = error
-**Collection:** Saves to Zotero's currently selected collection.
-
-Query collections:
-```bash
-python "e:/cnki/.claude/skills/cnki-export/scripts/push_to_zotero.py" --list
-```
-
-## Important Notes
-
-- **Windows encoding:** Must use Python script, cannot pass Chinese JSON via bash/curl directly
-- **Zotero must be running:** `localhost:23119` requires Zotero desktop in background
-- **Chinese authors:** Use `name` field (single field, not split), `creatorType: "author"`
-- **Batch export saves ~90% tool calls:** 9 papers: 33 calls → 3 calls
-- **CNKI Export API:** `filename` must be encrypted ID (`#export-id` or `input.cbItem` value), NOT `#paramfilename`
+| 항목 | 값 |
+|---|---|
+| API | `POST /dm8/API/GetExport` (상대 경로, `credentials: 'include'`) |
+| 필수 인자 | `filename`=내보내기 ID, `displaymode`=`GBTREFER,elearning,EndNote`, `uniplatform`=`OVERSEA`, `language`=`CHS` |
+| ID 출처 | 결과 페이지 `input.cbItem` 값 = 상세 페이지 `#export-id` |
+| ENDNOTE 태그 | 학술지 `%0 %A %T %J %D %N %K %X %P %@ %L %U %R %W` / 학위논문 `%0 %A %T %Y %I %9 %D %K %X %U %R %W` |
+| 응답 | `code: 1`이 성공. 실패는 `code: -1`, 「非常抱歉，请稍后重试」 |

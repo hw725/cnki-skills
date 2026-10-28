@@ -1,175 +1,82 @@
 ---
 name: cnki-journal-toc
-description: Browse journal issues, view table of contents, and download original TOC PDF from CNKI. Use when user wants to see papers in a specific journal issue or download the original cover/TOC pages.
-argument-hint: "[journal name] [year] [issue] [download]"
+description: "CNKI 해외판에서 한 학술지의 호(期)별 목차를 훑을 때 쓴다 — 연도·호를 골라 수록 논문 제목·저자·쪽을 뽑는다. 성균관대 프록시 경유. 학술지 찾기는 cnki-advanced-search의 LY 검색."
+license: "MIT (upstream README 표기 — LICENSE 파일 없음)"
+argument-hint: "[학술지명] [연도] [호 — 예: No.01]"
+metadata:
+  author: cookjohn
+  version: 1.0.0
+  category: cjk-research
+  upstream: https://github.com/cookjohn/cnki-skills @ 20d65f660456daf53ad0f7c74494ac3b829b925f
+  local_divergence: |
+    (1) 대상·도구·숨은 문자 정리는 cnki-search와 같다(성균관대 프록시 해외판, claude-in-chrome).
+    (2) 학술지 페이지로 가는 길을 cnki-journal-search 대신 「LY 검색 → 결과의 출처 링크」로 바꿨다 — journal-search는 들이지 않았고,
+        해외판 화면의 학술지 내비 링크(oversea.cnki.net/knavi/…)는 프록시로 바뀌지 않은 채 나온다(2026-10-22 실측).
+    (3) 원판 목차 PDF(原版目录) 내려받기는 실측하지 않아 절차에서 뺐다. AUD-20261022-123013-5e888b76.
 ---
 
-# CNKI Journal Table of Contents (期刊目录浏览 + 原版目录下载)
+# CNKI 학술지 호별 목차 (해외판·SKKU 프록시)
 
-Browse journal issues, extract the paper list, and optionally open/download the original TOC PDF (封面+目录扫描版).
+## 환경
 
-## Arguments
+`cnki-search`의 《환경》과 같다. 학술지 페이지 주소는 `https://oversea-cnki-net-ssl.ca.skku.edu/knavi/detail?p=…`이다.
 
-`$ARGUMENTS` describes what to browse:
-- `{journal name}` — which journal
-- `{year}` (optional) — which year, defaults to latest
-- `{issue}` (optional) — which issue number
-- `download` (optional) — if included, download the original TOC PDF
+## 절차
 
-Examples:
-- `计算机学报 2026 01期` — browse 2026 issue 1
-- `计算机学报 2026 01期 download` — download original TOC PDF
-- `计算机学报` — shows latest (网络首发)
+### 1. 학술지 페이지로 가기
 
-## Steps
-
-### 1. Navigate to journal detail page
-
-If not already on a journal detail page (`navi.cnki.net/knavi/detail`):
-- Use `cnki-journal-search` to find the journal
-- Use `mcp__chrome-devtools__list_pages` + `mcp__chrome-devtools__select_page` to switch to the journal detail tab (opens in new tab)
-
-### 2. Select issue + extract papers (single async evaluate_script)
-
-Replace `YEAR` and `ISSUE` with actual values (e.g., `"2025"`, `"No.01"`).
-The "刊期浏览" tab is the default active view — no need to click it.
+1. `cnki-advanced-search`로 `LY='학술지명'` 검색(간체로. 예: `LY='哲学研究'`).
+2. 결과 첫 행의 출처 링크 주소를 얻어 `navigate`한다(클릭은 새 탭을 연다):
 
 ```javascript
-async () => {
-  const year = "YEAR";
-  const issue = "ISSUE"; // Format: "No.01", "No.12", etc.
+document.querySelector('.result-table-list tbody td.source a')?.href || 'no-source-link'
+```
 
-  const dls = document.querySelectorAll('#yearissue0 dl.s-dataList');
-  let target = null;
-  for (const dl of dls) {
-    if (dl.querySelector('dt')?.innerText?.trim() === year) {
-      target = Array.from(dl.querySelectorAll('dd a')).find(a => a.innerText.trim() === issue);
-      break;
-    }
-  }
-  if (!target) {
-    // Return available years and issues for the requested year
-    const available = Array.from(dls).map(dl => ({
-      year: dl.querySelector('dt')?.innerText?.trim(),
-      issues: Array.from(dl.querySelectorAll('dd a')).map(a => a.innerText.trim())
-    })).filter(y => y.year);
-    return { error: 'issue_not_found', year, issue, available: available.slice(0, 5) };
-  }
+화면 머리의 「期刊」 같은 내비 링크는 프록시 밖 주소(`oversea.cnki.net`)라 쓰지 않는다.
 
+### 2. 연도·호 고르고 목차 추출 (한 호출)
+
+```javascript
+await (async () => {
+  const year = "2025", issue = "No.01";
+  const S = x => (x || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  const dls = [...document.querySelectorAll('#yearissue0 dl.s-dataList')];
+  const dl = dls.find(d => S(d.querySelector('dt')?.innerText) === year);
+  const target = dl && [...dl.querySelectorAll('dd a')].find(a => S(a.innerText) === issue);
+  if (!target) return { error: 'issue_not_found',
+    available: dls.slice(0, 5).map(d => ({ year: S(d.querySelector('dt')?.innerText), issues: [...d.querySelectorAll('dd a')].map(a => S(a.innerText)) })) };
   target.click();
-
-  // Wait for paper list to load
-  await new Promise((r, j) => {
-    let n = 0;
-    const c = () => {
-      const rows = document.querySelectorAll('#CataLogContent dd.row');
-      if (rows.length > 0) r();
-      else if (++n > 30) j('timeout');
-      else setTimeout(c, 500);
-    };
-    setTimeout(c, 1000);
-  });
-
-  // Extract papers
-  const rows = document.querySelectorAll('#CataLogContent dd.row');
-  const papers = Array.from(rows).map((dd, i) => ({
-    no: i + 1,
-    title: dd.querySelector('span.name a')?.innerText?.trim(),
-    authors: dd.querySelector('span.author')?.innerText?.trim()?.replace(/;$/, ''),
-    pages: dd.querySelector('span.company')?.innerText?.trim()
-  }));
-
-  // Get 原版目录 URL
-  const tocBtn = document.querySelector('a.btn-preview:not(.btn-back)');
-
+  await new Promise((r, j) => { let n = 0; const c = () => document.querySelectorAll('#CataLogContent dd.row').length ? r() : (++n > 30 ? j('timeout') : setTimeout(c, 500)); setTimeout(c, 1000); });
   return {
-    issueLabel: document.querySelector('span.date-list')?.innerText?.trim(),
-    paperCount: papers.length,
-    papers,
-    tocUrl: tocBtn?.href || null,
-    url: location.href
+    journal: S(document.title.replace(/\s*-\s*中国知网.*$/, '')),
+    issueLabel: S(document.querySelector('span.date-list')?.innerText),
+    papers: [...document.querySelectorAll('#CataLogContent dd.row')].map((dd, i) => ({
+      no: i + 1,
+      title: S(dd.querySelector('span.name a')?.innerText),
+      href: dd.querySelector('span.name a')?.href || '',
+      authors: S(dd.querySelector('span.author')?.innerText).replace(/;$/, ''),
+      pages: S(dd.querySelector('span.company')?.innerText)
+    }))
   };
-}
+})()
 ```
 
-### 3. Present results
+`issue_not_found`면 `available`(최근 5년의 호 목록)을 보이고 다시 고르게 한다.
+
+### 3. 보고
 
 ```
-## {journal_name} — {issueLabel}
-
-共 {paperCount} 篇论文：
-
-1. {title}  [pp. {pages}]
-   作者：{authors}
-
-2. {title}  [pp. {pages}]
-   作者：{authors}
-...
+## {journal} — {issueLabel}  (N편)
+1. {title}  [{pages}]  {authors}
 ```
 
-### 4. Download original TOC PDF (if requested)
+한 편을 자세히 보려면 그 `href`로 `cnki-paper-detail`, 서지를 모으려면 그 편들의 상세 페이지에서 `cnki-export`.
 
-If user requested download, or asks for "原版目录":
+## 확인한 선택자 (2026-10-22, 해외판 — 《哲学研究》 2025년 01기 15편 추출)
 
-**Method A — Click "原版目录浏览" to open reader, then download:**
-
-1. Find the `link` with text "原版目录浏览" in the snapshot (class `btn-preview`)
-2. Click it — this opens a new tab with the reader page (`kns.cnki.net/reader/report`)
-3. Use `mcp__chrome-devtools__list_pages` to find the new reader tab
-4. Use `mcp__chrome-devtools__select_page` to switch to it
-5. Use `mcp__chrome-devtools__wait_for` with text `["下载"]`
-6. Take snapshot — find the `link` with text "下载" (the download button in the reader toolbar)
-7. Click the download link — triggers PDF download via Chrome
-
-**Method B — Direct download from reader page:**
-
-If already on a reader page (`kns.cnki.net/reader/report`):
-1. Take snapshot
-2. Find `link` with text "下载"
-3. Click it
-
-After clicking, inform the user:
-> 原版目录 PDF 下载已触发，请在 Chrome 下载管理器中查看。
-
-## Tool calls
-
-- Browse issue: 1 (evaluate_script only) — after navigating to journal page
-- Download TOC: requires snapshot + click + tab switching (new tab)
-
-## Verified selectors
-
-### Journal Detail — 刊期浏览
-
-| Element | Selector | Notes |
-|---------|----------|-------|
-| 刊期浏览 tab | `a` text "刊期浏览" | default active (`li.on.cur`), no need to click |
-| Year area | `#yearissue0` / `.yearissuepage` | |
-| Year groups | `dl.s-dataList` | inside `#yearissue0` |
-| Year label | `dl.s-dataList dt` | text "2026", "2025" etc. |
-| Issue links | `dl.s-dataList dd a` | text "No.01", "No.12" etc. |
-| Issue label | `span.date-list` | text "2025年01期" |
-| Paper container | `#CataLogContent` | |
-| Paper entries | `#CataLogContent dd.row` | |
-| Paper title | `dd.row span.name a` | href to `kcms2/article/abstract` |
-| Paper authors | `dd.row span.author` | semicolon-separated |
-| Paper page range | `dd.row span.company` | class is "company" but holds page range |
-| Paper ID | `dd.row b[name="encrypt"]` | id like "JSJX202512001" |
-| 原版目录浏览 | `a.btn-preview:not(.btn-back)` | href to `bar.cnki.net/bar/download/order` |
-| 返回 | `a.btn-preview.btn-back` | |
-
-### Reader Page (kns.cnki.net/reader/report)
-
-| Element | Pattern |
-|---------|--------|
-| Page title | `RootWebArea "期刊原版目录"` |
-| Download button | `link` text "下载", URL to `bar.cnki.net/bar/download/order` |
-| Current page | `textbox` value (page number) |
-| Total pages | `StaticText` (e.g., "4") |
-| Navigation | `generic` description "上一页" / "下一页" |
-
-## Important Notes
-
-- "原版目录浏览" only appears when a **specific issue** is selected (not for 网络首发 view).
-- The reader page opens in a **new tab**.
-- The download link in the reader requires login. If download fails, remind user to log in.
-- The download URL is session-specific — do not cache or reuse.
+| 요소 | 선택자 |
+|---|---|
+| 연도 묶음 | `#yearissue0 dl.s-dataList`, 연도 `dt`, 호 `dd a`(「No.01」) |
+| 호 표시 | `span.date-list`(「2025年01期」) |
+| 목차 행 | `#CataLogContent dd.row` |
+| 제목·저자·쪽 | `span.name a`·`span.author`·`span.company` |

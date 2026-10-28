@@ -1,182 +1,100 @@
 ---
 name: cnki-paper-detail
-description: Extract full paper details from a CNKI paper page including title, authors, affiliations, abstract, keywords, fund, classification. Use when the user needs detailed information about a specific paper.
-argument-hint: "[paper URL or blank if already on detail page]"
+description: "CNKI 해외판 논문·학위논문 상세 페이지에서 제목·저자·소속·초록·키워드·기금·분류번호·인용 관계 수를 뽑을 때 쓴다 — 성균관대 프록시 경유. 서지 파일 저장은 cnki-export."
+license: "MIT (upstream README 표기 — LICENSE 파일 없음)"
+argument-hint: "[상세 페이지 URL, 비우면 지금 페이지]"
+metadata:
+  author: cookjohn
+  version: 1.0.0
+  category: cjk-research
+  upstream: https://github.com/cookjohn/cnki-skills @ 20d65f660456daf53ad0f7c74494ac3b829b925f
+  local_divergence: |
+    (1) 대상·도구·숨은 문자 정리는 cnki-search와 같다(성균관대 프록시 해외판, claude-in-chrome).
+    (2) 해외판 학위논문 페이지는 소속·출처 요소(.doc-top·두 번째 h3.author)가 비어 있다(2026-10-22 실측).
+        그래서 DOM 추출에 더해 내보내기 API의 ENDNOTE를 함께 받아 출처·연도·권호·쪽·ISSN·DOI·학위 정보를 채운다.
+    (3) 스냅숏 대체 경로는 claude-in-chrome의 get_page_text로 바꿨다. AUD-20261022-123013-5e888b76.
 ---
 
-# CNKI Paper Detail Extraction
+# CNKI 논문 상세 (해외판·SKKU 프록시)
 
-Extract complete metadata from a CNKI paper detail page.
+## 환경
 
-## Arguments
+`cnki-search`의 《환경》과 같다. 상세 페이지 주소는 `https://oversea-cnki-net-ssl.ca.skku.edu/kcms2/article/abstract?v=…`이다.
 
-`$ARGUMENTS` is optionally a CNKI paper detail URL (containing `kcms2/article/abstract`). If not provided, assumes the current page is already a paper detail page.
+## 절차
 
-## Steps
+### 1. 이동 (URL이 주어졌을 때)
 
-### 1. Navigate to the paper page (if URL provided)
+`navigate` → 그 URL. 검색 결과에서 왔다면 결과의 `href`를 쓴다.
 
-If `$ARGUMENTS` contains a URL:
-- Use `mcp__chrome-devtools__navigate_page` with the URL.
-- Use `mcp__chrome-devtools__wait_for` with text `["摘要"]` and timeout 15000.
-
-### 2. Check for captcha
-
-Use `mcp__chrome-devtools__take_snapshot`. If "拖动下方拼图完成验证" found, notify user:
-
-> CNKI 正在显示滑块验证码。请在 Chrome 浏览器中手动完成拼图验证，完成后告诉我继续。
-
-### 3. Extract paper metadata via JavaScript
-
-Use `mcp__chrome-devtools__evaluate_script` with this function:
+### 2. 추출 (한 호출)
 
 ```javascript
-() => {
-  const brief = document.querySelector('.brief');
-  if (!brief) return { error: 'Paper detail section (.brief) not found' };
-
-  // Title
-  const title = brief.querySelector('h1')?.innerText?.trim()
-    ?.replace(/\s*附视频\s*$/, '')  // remove "附视频" suffix
-    ?.replace(/\s*网络首发\s*$/, ''); // remove "网络首发" suffix
-
-  // Authors - first h3.author contains author links with sup tags
-  const authorH3s = brief.querySelectorAll('h3.author');
-  const authorSection = authorH3s[0];
-  const authors = [];
-  if (authorSection) {
-    const authorLinks = authorSection.querySelectorAll('a');
-    authorLinks.forEach(a => {
-      const name = a.innerText?.replace(/\d+$/, '').trim();
-      const supMatch = a.innerText?.match(/(\d+)$/);
-      const affiliationNum = supMatch ? supMatch[1] : '';
-      authors.push({ name, affiliationNum });
-    });
-  }
-
-  // Affiliations - second h3.author contains org links
-  const affiliations = [];
-  if (authorH3s.length > 1) {
-    const orgLinks = authorH3s[1].querySelectorAll('a');
-    orgLinks.forEach(a => {
-      affiliations.push(a.innerText?.trim());
-    });
-  }
-
-  // Abstract
-  const abstractEl = document.querySelector('.abstract-text');
-  const abstract = abstractEl?.innerText?.trim() || '';
-
-  // Keywords
-  const keywordsP = document.querySelector('p.keywords');
-  const keywords = keywordsP
-    ? Array.from(keywordsP.querySelectorAll('a')).map(a => a.innerText?.replace(/;$/, '').trim())
-    : [];
-
-  // Fund
-  const fundsP = document.querySelector('p.funds');
-  const fund = fundsP?.innerText?.trim() || '';
-
-  // Classification code
-  const clcCode = document.querySelector('.clc-code');
-  const classification = clcCode?.innerText?.trim() || '';
-
-  // Journal/source
-  const docTop = document.querySelector('.doc-top');
-  const journal = docTop?.querySelector('a')?.innerText?.trim() || '';
-
-  // Online first / publication info
-  const headTime = document.querySelector('.head-time');
-  const pubInfo = headTime?.innerText?.trim() || '';
-
-  // Is online first?
-  const isOnlineFirst = !!brief.querySelector('.icon-shoufa');
-
-  // Article outline/TOC
-  const catalogList = document.querySelector('.catalog-list, .catalog-listDiv');
-  const toc = catalogList?.innerText?.trim() || '';
-
-  // Citation network counts
-  const citationTabs = document.querySelectorAll('ul.module-tab.tpl_lieteratures li');
-  const citationInfo = {};
-  citationTabs.forEach(li => {
-    const id = li.getAttribute('data-id');
-    const text = li.innerText?.trim();
-    const countMatch = text.match(/(\d+)/);
-    if (id) {
-      citationInfo[id] = {
-        label: text.replace(/\d+/, '').trim(),
-        count: countMatch ? parseInt(countMatch[1]) : 0
-      };
-    }
-  });
-
-  return {
-    title,
-    authors,
-    affiliations,
-    abstract,
-    keywords,
-    fund,
-    classification,
-    journal,
-    pubInfo,
-    isOnlineFirst,
-    toc,
-    citationInfo
+await (async () => {
+  const S = x => (x || '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+  const q = s => document.querySelector(s);
+  await new Promise((r, j) => { let n = 0; const c = () => q('.brief h1') ? r() : (++n > 30 ? j('timeout') : setTimeout(c, 500)); c(); });
+  const cap = q('#tcaptcha_transform_dy');
+  if (cap && cap.getBoundingClientRect().top >= 0) return { error: 'captcha' };
+  const brief = q('.brief'), h3 = brief.querySelectorAll('h3.author');
+  const out = {
+    title: S(brief.querySelector('h1')?.innerText).replace(/\s*(附视频|网络首发)\s*$/, ''),
+    authors: h3[0] ? [...h3[0].querySelectorAll('a')].map(a => S(a.innerText).replace(/\d+$/, '')) : [],
+    affiliations: h3[1] ? [...h3[1].querySelectorAll('a')].map(a => S(a.innerText)) : [],
+    abstract: S(q('.abstract-text')?.innerText),
+    keywords: [...document.querySelectorAll('p.keywords a')].map(a => S(a.innerText).replace(/;$/, '')),
+    fund: S(q('p.funds')?.innerText),
+    clc: S(q('.clc-code')?.innerText),
+    dbcode: q('#paramdbcode')?.value || '',          // CJFD·CMFD(석사)·CDFD(박사) 등
+    citations: Object.fromEntries([...document.querySelectorAll('ul.module-tab.tpl_lieteratures li')]
+      .map(li => [li.getAttribute('data-id'), +(S(li.innerText).match(/\d+/)?.[0] || 0)])),
+    url: location.href
   };
-}
+  // ENDNOTE — 출처·권호·쪽·ISSN·DOI·학위 정보의 정본
+  const resp = await fetch(q('#export-url')?.value || '/dm8/API/GetExport', { method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ filename: q('#export-id')?.value || '', displaymode: 'GBTREFER,elearning,EndNote',
+      uniplatform: 'OVERSEA', language: 'CHS' }) });
+  const data = await resp.json();
+  if (data.code === 1) {
+    const mode = m => S((data.data.find(d => d.mode === m)?.value?.[0] || '').replace(/<br>/g, '\n')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+    out.gbt7714 = mode('GBTREFER').replace(/^\[1\]/, '');
+    out.endnote = mode('ENDNOTE');
+  } else out.exportError = data.message || data.msg || data.code;
+  return out;
+})()
 ```
 
-### 4. Format and present the output
+### 3. 보고
 
 ```
-## {title} {isOnlineFirst ? "[网络首发]" : ""}
-
-**Authors:**
-{For each author: "- {name} ({affiliation})"}
-
-**Affiliations:**
-{For each affiliation: "- {affiliation}"}
-
-**Journal:** {journal}
-**Publication Info:** {pubInfo}
-
-**Abstract:**
-{abstract}
-
-**Keywords:** {keywords joined by ", "}
-
-**Fund:** {fund}
-**Classification:** {classification}
-
-**Citation Network:**
-{For each citation type: "- {label}: {count}"}
+## {title}
+저자: {authors} / 소속: {affiliations — 비면 ENDNOTE %I(학위 수여 기관)}
+출처: {ENDNOTE %J 또는 %I} {%D}년 {%N}기 {%P}쪽  ISSN {%@}  DOI {%R}
+학위: {%9}  지도교수: {%Y}        ← 학위논문일 때만
+초록: {abstract}
+키워드: {keywords}
+기금: {fund} / 분류번호: {clc}
+인용 관계: 참고문헌 {references} · 피인용 {citations} …
+GB/T 7714: {gbt7714}
 ```
 
-### 5. Fallback: snapshot-based parsing
+ENDNOTE 태그: `%0` 유형(Journal Article·Thesis), `%A` 저자, `%T` 제목, `%J` 학술지, `%D` 연도, `%N` 기(期), `%P` 쪽, `%@` ISSN, `%K` 키워드, `%X` 초록, `%U` 링크, `%R` DOI, `%I` 기관, `%9` 학위, `%Y` 지도교수.
 
-If JS extraction fails, use `mcp__chrome-devtools__take_snapshot` and parse the accessibility tree:
-- **Title**: `heading` level 1 element
-- **Authors**: `link` elements whose URLs contain `kcms2/author/detail`
-- **Affiliations**: `link` elements whose URLs contain `kcms2/organ/detail`
-- **Abstract**: `StaticText` following "摘要："
-- **Keywords**: `link` elements whose URLs contain `kcms2/keyword/detail`
-- **Fund**: `link` elements following "基金资助："
-- **Classification**: `StaticText` following "分类号："
+### 4. 대체 경로
 
-## Verified DOM Selectors
+스크립트가 `timeout`이면 `mcp__claude-in-chrome__get_page_text`로 본문을 받아 「摘要」「关键词」「基金资助」「分类号」 뒤의 글을 읽는다.
 
-| Data           | Selector                                   | Notes                                    |
-|----------------|--------------------------------------------|------------------------------------------|
-| Paper section  | `.brief`                                    | Main paper info container                |
-| Title          | `.brief h1`                                 | May contain icons, clean text needed     |
-| Authors        | `.brief h3.author:first-of-type a`          | Text has superscript numbers (e.g., "张三1") |
-| Affiliations   | `.brief h3.author:nth-of-type(2) a`         | Text starts with "N." (e.g., "1.北京大学") |
-| Abstract       | `.abstract-text`                            | Full abstract text                       |
-| Keywords       | `p.keywords a`                              | Semicolon-separated keyword links        |
-| Fund           | `p.funds`                                   | Fund information text                    |
-| Classification | `.clc-code`                                 | CLC classification codes                |
-| Journal        | `.doc-top a`                                | Source journal link                      |
-| Online first   | `.brief .icon-shoufa`                       | Present if paper is online first         |
-| Citation tabs  | `ul.module-tab.tpl_lieteratures li`         | data-id attr identifies type             |
+## 확인한 선택자 (2026-10-22, 해외판)
+
+| 요소 | 선택자 | 비고 |
+|---|---|---|
+| 본문 머리 | `.brief`, 제목 `.brief h1` | |
+| 저자·소속 | `.brief h3.author` 첫째·둘째 | 학위논문은 소속이 비어 있다 |
+| 초록 | `.abstract-text` | |
+| 키워드 | `p.keywords a` | |
+| 기금·분류번호 | `p.funds`·`.clc-code` | 없으면 빈 값 |
+| 데이터베이스 코드 | `#paramdbcode` | |
+| 인용 탭 | `ul.module-tab.tpl_lieteratures li[data-id]` | references·citations·coreferences·cocitations·secondreferences·secondcitations |
+| 내보내기 | `#export-url`(= `/dm8/API/GetExport`)·`#export-id` | `uniplatform=OVERSEA` |
